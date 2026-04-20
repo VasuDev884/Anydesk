@@ -25,10 +25,25 @@ let currentHostId = null;
 let pendingViewerCandidates = [];
 const pendingHostCandidates = new Map();
 
+// ==========================
+// CHANGE HERE: add TURN server
+// ==========================
 const rtcConfig = {
   iceServers: [
-    { urls: "stun:stun.l.google.com:19302" }
-  ]
+    { urls: "stun:stun.l.google.com:19302" },
+
+    // Replace these with your real TURN details
+    // Example only:
+    // {
+    //   urls: "turn:your-turn-server.com:3478",
+    //   username: "your-username",
+    //   credential: "your-password"
+    // }
+
+    // If you do not have TURN yet, keep only STUN for now,
+    // but cross-network connections may fail.
+  ],
+  iceCandidatePoolSize: 10
 };
 
 function setStatus(message) {
@@ -104,10 +119,13 @@ function cleanupHostPeer(viewerId) {
     pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
     pc.oniceconnectionstatechange = null;
+    pc.onicegatheringstatechange = null;
+    pc.onicecandidateerror = null;
     pc.ontrack = null;
     pc.close();
     hostPeerConnections.delete(viewerId);
   }
+
   pendingHostCandidates.delete(viewerId);
 }
 
@@ -117,6 +135,8 @@ function cleanupViewerPeer() {
     viewerPeerConnection.ontrack = null;
     viewerPeerConnection.onconnectionstatechange = null;
     viewerPeerConnection.oniceconnectionstatechange = null;
+    viewerPeerConnection.onicegatheringstatechange = null;
+    viewerPeerConnection.onicecandidateerror = null;
     viewerPeerConnection.close();
     viewerPeerConnection = null;
   }
@@ -155,6 +175,23 @@ async function flushHostCandidates(viewerId) {
     } catch (error) {
       console.error("Host pending ICE error:", error);
     }
+  }
+}
+
+async function logSelectedCandidatePair(pc, label = "PC") {
+  try {
+    const stats = await pc.getStats();
+    stats.forEach((report) => {
+      if (
+        report.type === "candidate-pair" &&
+        report.state === "succeeded" &&
+        report.nominated
+      ) {
+        console.log(`${label} selected candidate pair:`, report);
+      }
+    });
+  } catch (error) {
+    console.error(`${label} stats error:`, error);
   }
 }
 
@@ -457,11 +494,28 @@ function createHostPeerConnection(viewerId) {
     }
   };
 
-  pc.onconnectionstatechange = () => {
+  pc.onicecandidateerror = (event) => {
+    console.error("Host ICE candidate error:", event);
+  };
+
+  pc.onicegatheringstatechange = () => {
+    console.log("Host ICE gathering state:", pc.iceGatheringState);
+  };
+
+  pc.onconnectionstatechange = async () => {
     console.log("Host PC state:", pc.connectionState);
 
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-      setStatus(`Connection failed with viewer ${viewerId}`);
+    if (pc.connectionState === "connected") {
+      setStatus(`Connected to viewer ${viewerId}`);
+      await logSelectedCandidatePair(pc, "Host");
+    }
+
+    if (pc.connectionState === "failed") {
+      setStatus(`Connection failed with viewer ${viewerId}. TURN server may be required.`);
+      console.error("Host peer connection failed.");
+    }
+
+    if (pc.connectionState === "closed") {
       cleanupHostPeer(viewerId);
     }
   };
@@ -469,7 +523,12 @@ function createHostPeerConnection(viewerId) {
   pc.oniceconnectionstatechange = () => {
     console.log("Host ICE state:", pc.iceConnectionState);
 
-    if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
+    if (pc.iceConnectionState === "failed") {
+      setStatus(`Host ICE failed for viewer ${viewerId}. TURN server likely needed.`);
+      console.error("Host ICE failed.");
+    }
+
+    if (pc.iceConnectionState === "closed") {
       cleanupHostPeer(viewerId);
     }
   };
@@ -487,6 +546,14 @@ function createViewerPeerConnection(hostId) {
         candidate: event.candidate
       });
     }
+  };
+
+  pc.onicecandidateerror = (event) => {
+    console.error("Viewer ICE candidate error:", event);
+  };
+
+  pc.onicegatheringstatechange = () => {
+    console.log("Viewer ICE gathering state:", pc.iceGatheringState);
   };
 
   pc.ontrack = async (event) => {
@@ -512,17 +579,23 @@ function createViewerPeerConnection(hostId) {
     setStatus("Receiving host screen.");
   };
 
-  pc.onconnectionstatechange = () => {
+  pc.onconnectionstatechange = async () => {
     console.log("Viewer PC state:", pc.connectionState);
 
     if (pc.connectionState === "connected") {
       setStatus("Viewer connected. Waiting for host screen...");
+      await logSelectedCandidatePair(pc, "Viewer");
     }
 
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+    if (pc.connectionState === "failed") {
+      setStatus("Viewer connection failed. TURN server is likely needed.");
+      console.error("Viewer peer connection failed.");
+    }
+
+    if (pc.connectionState === "closed") {
       cleanupViewerPeer();
       clearVideo();
-      setStatus("Viewer connection failed.");
+      setStatus("Viewer connection closed.");
     }
   };
 
@@ -536,7 +609,12 @@ function createViewerPeerConnection(hostId) {
       setStatus("Receiving host screen...");
     }
 
-    if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
+    if (pc.iceConnectionState === "failed") {
+      setStatus("ICE failed. TURN server is likely needed.");
+      console.error("Viewer ICE failed.");
+    }
+
+    if (pc.iceConnectionState === "closed") {
       cleanupViewerPeer();
       clearVideo();
       setStatus("Viewer connection lost.");
