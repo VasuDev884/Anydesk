@@ -25,23 +25,39 @@ let currentHostId = null;
 let pendingViewerCandidates = [];
 const pendingHostCandidates = new Map();
 
-// ==========================
-// CHANGE HERE: add TURN server
-// ==========================
+/*
+========================================================
+CHANGE ONLY THIS BLOCK
+Replace these values:
+YOUR_TURN_HOST
+YOUR_TURN_USERNAME
+YOUR_TURN_PASSWORD
+========================================================
+*/
 const rtcConfig = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
 
-    // Replace these with your real TURN details
-    // Example only:
-    // {
-    //   urls: "turn:your-turn-server.com:3478",
-    //   username: "your-username",
-    //   credential: "your-password"
-    // }
-
-    // If you do not have TURN yet, keep only STUN for now,
-    // but cross-network connections may fail.
+    {
+      urls: "turn:YOUR_TURN_HOST:80",
+      username: "YOUR_TURN_USERNAME",
+      credential: "YOUR_TURN_PASSWORD"
+    },
+    {
+      urls: "turn:YOUR_TURN_HOST:443",
+      username: "YOUR_TURN_USERNAME",
+      credential: "YOUR_TURN_PASSWORD"
+    },
+    {
+      urls: "turn:YOUR_TURN_HOST:443?transport=tcp",
+      username: "YOUR_TURN_USERNAME",
+      credential: "YOUR_TURN_PASSWORD"
+    },
+    {
+      urls: "turns:YOUR_TURN_HOST:443",
+      username: "YOUR_TURN_USERNAME",
+      credential: "YOUR_TURN_PASSWORD"
+    }
   ],
   iceCandidatePoolSize: 10
 };
@@ -511,7 +527,7 @@ function createHostPeerConnection(viewerId) {
     }
 
     if (pc.connectionState === "failed") {
-      setStatus(`Connection failed with viewer ${viewerId}. TURN server may be required.`);
+      setStatus(`Connection failed with viewer ${viewerId}.`);
       console.error("Host peer connection failed.");
     }
 
@@ -524,7 +540,7 @@ function createHostPeerConnection(viewerId) {
     console.log("Host ICE state:", pc.iceConnectionState);
 
     if (pc.iceConnectionState === "failed") {
-      setStatus(`Host ICE failed for viewer ${viewerId}. TURN server likely needed.`);
+      setStatus(`Host ICE failed for viewer ${viewerId}.`);
       console.error("Host ICE failed.");
     }
 
@@ -588,7 +604,7 @@ function createViewerPeerConnection(hostId) {
     }
 
     if (pc.connectionState === "failed") {
-      setStatus("Viewer connection failed. TURN server is likely needed.");
+      setStatus("Viewer connection failed.");
       console.error("Viewer peer connection failed.");
     }
 
@@ -610,7 +626,7 @@ function createViewerPeerConnection(hostId) {
     }
 
     if (pc.iceConnectionState === "failed") {
-      setStatus("ICE failed. TURN server is likely needed.");
+      setStatus("ICE failed.");
       console.error("Viewer ICE failed.");
     }
 
