@@ -662,3 +662,4 @@ function leaveRoom() {
   setStatus("Left room.");
   setRoomInfo("");
 }
+
