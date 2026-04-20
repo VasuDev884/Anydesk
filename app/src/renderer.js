@@ -22,9 +22,13 @@ const hostPeerConnections = new Map();
 
 let viewerPeerConnection = null;
 let currentHostId = null;
+let pendingViewerCandidates = [];
+const pendingHostCandidates = new Map();
 
 const rtcConfig = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" }
+  ]
 };
 
 function setStatus(message) {
@@ -86,10 +90,12 @@ function cleanupHostPeer(viewerId) {
   if (pc) {
     pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
-    pc.onnegotiationneeded = null;
+    pc.oniceconnectionstatechange = null;
+    pc.ontrack = null;
     pc.close();
     hostPeerConnections.delete(viewerId);
   }
+  pendingHostCandidates.delete(viewerId);
 }
 
 function cleanupViewerPeer() {
@@ -97,11 +103,46 @@ function cleanupViewerPeer() {
     viewerPeerConnection.onicecandidate = null;
     viewerPeerConnection.ontrack = null;
     viewerPeerConnection.onconnectionstatechange = null;
+    viewerPeerConnection.oniceconnectionstatechange = null;
     viewerPeerConnection.close();
     viewerPeerConnection = null;
   }
 
   currentHostId = null;
+  pendingViewerCandidates = [];
+}
+
+async function flushViewerCandidates() {
+  if (!viewerPeerConnection || !viewerPeerConnection.remoteDescription) return;
+
+  while (pendingViewerCandidates.length) {
+    const candidate = pendingViewerCandidates.shift();
+    if (!candidate) continue;
+
+    try {
+      await viewerPeerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (error) {
+      console.error("Viewer pending ICE error:", error);
+    }
+  }
+}
+
+async function flushHostCandidates(viewerId) {
+  const pc = hostPeerConnections.get(viewerId);
+  const queue = pendingHostCandidates.get(viewerId);
+
+  if (!pc || !pc.remoteDescription || !queue?.length) return;
+
+  while (queue.length) {
+    const candidate = queue.shift();
+    if (!candidate) continue;
+
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (error) {
+      console.error("Host pending ICE error:", error);
+    }
+  }
 }
 
 async function createAndSendOffer(viewerId) {
@@ -122,7 +163,11 @@ async function createAndSendOffer(viewerId) {
   });
 
   try {
-    const offer = await pc.createOffer();
+    const offer = await pc.createOffer({
+      offerToReceiveVideo: true,
+      offerToReceiveAudio: false
+    });
+
     await pc.setLocalDescription(offer);
 
     socket.emit("offer", {
@@ -221,6 +266,8 @@ function ensureSocket() {
         new RTCSessionDescription(sdp)
       );
 
+      await flushViewerCandidates();
+
       const answer = await viewerPeerConnection.createAnswer();
       await viewerPeerConnection.setLocalDescription(answer);
 
@@ -244,6 +291,7 @@ function ensureSocket() {
 
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      await flushHostCandidates(from);
       setStatus(`Viewer ${from} answered.`);
     } catch (error) {
       console.error("Set remote description error:", error);
@@ -253,12 +301,27 @@ function ensureSocket() {
 
   socket.on("ice-candidate", async ({ from, candidate }) => {
     try {
+      if (!candidate) return;
+
       if (role === "host") {
         const pc = hostPeerConnections.get(from);
-        if (pc) {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        if (!pc) return;
+
+        if (!pc.remoteDescription) {
+          if (!pendingHostCandidates.has(from)) {
+            pendingHostCandidates.set(from, []);
+          }
+          pendingHostCandidates.get(from).push(candidate);
+          return;
         }
+
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
       } else if (role === "viewer" && viewerPeerConnection) {
+        if (!viewerPeerConnection.remoteDescription) {
+          pendingViewerCandidates.push(candidate);
+          return;
+        }
+
         await viewerPeerConnection.addIceCandidate(
           new RTCIceCandidate(candidate)
         );
@@ -323,6 +386,10 @@ async function startSharing() {
       localStream = null;
     }
 
+    for (const [viewerId] of hostPeerConnections.entries()) {
+      cleanupHostPeer(viewerId);
+    }
+
     localStream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         frameRate: 24,
@@ -380,10 +447,19 @@ function createHostPeerConnection(viewerId) {
   pc.onconnectionstatechange = () => {
     console.log("Host PC state:", pc.connectionState);
 
+    if (pc.connectionState === "failed") {
+      setStatus(`Connection failed with viewer ${viewerId}`);
+      cleanupHostPeer(viewerId);
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log("Host ICE state:", pc.iceConnectionState);
+
     if (
-      pc.connectionState === "failed" ||
-      pc.connectionState === "disconnected" ||
-      pc.connectionState === "closed"
+      pc.iceConnectionState === "failed" ||
+      pc.iceConnectionState === "disconnected" ||
+      pc.iceConnectionState === "closed"
     ) {
       cleanupHostPeer(viewerId);
     }
@@ -412,7 +488,7 @@ function createViewerPeerConnection(hostId) {
     console.log("Track muted:", event.track?.muted);
     console.log("Track enabled:", event.track?.enabled);
 
-    let stream = event.streams && event.streams[0];
+    let stream = event.streams?.[0];
 
     if (!stream && event.track) {
       stream = new MediaStream([event.track]);
@@ -430,10 +506,28 @@ function createViewerPeerConnection(hostId) {
   pc.onconnectionstatechange = () => {
     console.log("Viewer PC state:", pc.connectionState);
 
+    if (pc.connectionState === "connected") {
+      setStatus("Viewer connected. Waiting for host screen...");
+    }
+
+    if (pc.connectionState === "failed") {
+      cleanupViewerPeer();
+      clearVideo();
+      setStatus("Viewer connection failed.");
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log("Viewer ICE state:", pc.iceConnectionState);
+
+    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+      setStatus("Receiving host screen...");
+    }
+
     if (
-      pc.connectionState === "failed" ||
-      pc.connectionState === "disconnected" ||
-      pc.connectionState === "closed"
+      pc.iceConnectionState === "failed" ||
+      pc.iceConnectionState === "disconnected" ||
+      pc.iceConnectionState === "closed"
     ) {
       cleanupViewerPeer();
       clearVideo();
