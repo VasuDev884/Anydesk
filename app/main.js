@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, session, desktopCapturer } = require("electron");
 const path = require("path");
 
 function createWindow() {
@@ -18,6 +18,32 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({
+          types: ["screen", "window"]
+        });
+
+        if (!sources.length) {
+          callback({});
+          return;
+        }
+
+        callback({
+          video: sources[0],
+          audio: false
+        });
+      } catch (error) {
+        console.error("Screen share setup error:", error);
+        callback({});
+      }
+    },
+    {
+      useSystemPicker: true
+    }
+  );
+
   createWindow();
 
   app.on("activate", function () {

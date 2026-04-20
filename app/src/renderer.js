@@ -15,17 +15,18 @@ const leaveBtn = document.getElementById("leaveBtn");
 let role = "host";
 let socket = null;
 let localStream = null;
+let currentRoomId = null;
+let isJoining = false;
 
 // For host: peer connections by viewer id
 const hostPeerConnections = new Map();
 
 // For viewer: a single host peer connection
 let viewerPeerConnection = null;
+let currentHostId = null;
 
 const rtcConfig = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" }
-  ]
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
 
 function setStatus(message) {
@@ -63,23 +64,69 @@ function getRoomId() {
   return roomIdInput.value.trim();
 }
 
+function showVideo(stream, muted = false) {
+  remoteVideo.srcObject = stream;
+  remoteVideo.muted = muted;
+  videoPlaceholder.style.display = "none";
+}
+
+function clearVideo() {
+  remoteVideo.srcObject = null;
+  videoPlaceholder.style.display = "block";
+}
+
+function cleanupHostPeer(viewerId) {
+  const pc = hostPeerConnections.get(viewerId);
+  if (pc) {
+    pc.close();
+    hostPeerConnections.delete(viewerId);
+  }
+}
+
+function cleanupViewerPeer() {
+  if (viewerPeerConnection) {
+    viewerPeerConnection.close();
+    viewerPeerConnection = null;
+  }
+  currentHostId = null;
+}
+
 function ensureSocket() {
-  if (socket?.connected) return socket;
+  if (socket) return socket;
 
   const serverUrl = getServerUrl();
+
   socket = window.io(serverUrl, {
-    transports: ["websocket"]
+    transports: ["websocket", "polling"],
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 1000
   });
 
   socket.on("connect", () => {
     setStatus(`Connected to signaling server.\nSocket: ${socket.id}`);
+
+    if (currentRoomId && !isJoining) {
+      socket.emit("join-room", {
+        roomId: currentRoomId,
+        role
+      });
+      isJoining = true;
+    }
   });
 
   socket.on("connect_error", (error) => {
     setStatus(`Connection error: ${error.message}`);
   });
 
+  socket.on("disconnect", (reason) => {
+    setStatus(`Disconnected: ${reason}`);
+  });
+
   socket.on("room-info", ({ roomId, hostPresent, viewerCount }) => {
+    currentRoomId = roomId;
+    isJoining = false;
+
     setRoomInfo(
       `Room: ${roomId}\nHost present: ${hostPresent ? "Yes" : "No"}\nViewers: ${viewerCount}`
     );
@@ -87,9 +134,14 @@ function ensureSocket() {
 
   socket.on("viewer-joined", async ({ viewerId }) => {
     if (role !== "host") return;
+
     if (!localStream) {
       setStatus("A viewer joined, but no shared screen is active yet.");
       return;
+    }
+
+    if (hostPeerConnections.has(viewerId)) {
+      cleanupHostPeer(viewerId);
     }
 
     const pc = createHostPeerConnection(viewerId);
@@ -99,32 +151,48 @@ function ensureSocket() {
       pc.addTrack(track, localStream);
     });
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
 
-    socket.emit("offer", {
-      target: viewerId,
-      sdp: offer
-    });
+      socket.emit("offer", {
+        target: viewerId,
+        sdp: offer
+      });
 
-    setStatus(`Viewer connected: ${viewerId}\nOffer sent.`);
+      setStatus(`Viewer connected: ${viewerId}\nOffer sent.`);
+    } catch (error) {
+      console.error("Offer creation error:", error);
+      setStatus(`Failed to create offer: ${error.message}`);
+    }
   });
 
   socket.on("offer", async ({ from, sdp }) => {
     if (role !== "viewer") return;
 
+    cleanupViewerPeer();
+
+    currentHostId = from;
     viewerPeerConnection = createViewerPeerConnection(from);
-    await viewerPeerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
 
-    const answer = await viewerPeerConnection.createAnswer();
-    await viewerPeerConnection.setLocalDescription(answer);
+    try {
+      await viewerPeerConnection.setRemoteDescription(
+        new RTCSessionDescription(sdp)
+      );
 
-    socket.emit("answer", {
-      target: from,
-      sdp: answer
-    });
+      const answer = await viewerPeerConnection.createAnswer();
+      await viewerPeerConnection.setLocalDescription(answer);
 
-    setStatus("Received offer from host.\nAnswer sent.");
+      socket.emit("answer", {
+        target: from,
+        sdp: answer
+      });
+
+      setStatus("Received offer from host.\nAnswer sent.");
+    } catch (error) {
+      console.error("Answer creation error:", error);
+      setStatus(`Failed to answer: ${error.message}`);
+    }
   });
 
   socket.on("answer", async ({ from, sdp }) => {
@@ -133,8 +201,13 @@ function ensureSocket() {
     const pc = hostPeerConnections.get(from);
     if (!pc) return;
 
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    setStatus(`Viewer ${from} answered.`);
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      setStatus(`Viewer ${from} answered.`);
+    } catch (error) {
+      console.error("Set remote description error:", error);
+      setStatus(`Failed to set answer: ${error.message}`);
+    }
   });
 
   socket.on("ice-candidate", async ({ from, candidate }) => {
@@ -145,7 +218,9 @@ function ensureSocket() {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         }
       } else if (role === "viewer" && viewerPeerConnection) {
-        await viewerPeerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        await viewerPeerConnection.addIceCandidate(
+          new RTCIceCandidate(candidate)
+        );
       }
     } catch (error) {
       console.error("ICE candidate error:", error);
@@ -154,21 +229,12 @@ function ensureSocket() {
 
   socket.on("host-left", () => {
     setStatus("Host left the room.");
-    remoteVideo.srcObject = null;
-    videoPlaceholder.style.display = "block";
-
-    if (viewerPeerConnection) {
-      viewerPeerConnection.close();
-      viewerPeerConnection = null;
-    }
+    clearVideo();
+    cleanupViewerPeer();
   });
 
   socket.on("viewer-left", ({ viewerId }) => {
-    const pc = hostPeerConnections.get(viewerId);
-    if (pc) {
-      pc.close();
-      hostPeerConnections.delete(viewerId);
-    }
+    cleanupHostPeer(viewerId);
     setStatus(`Viewer left: ${viewerId}`);
   });
 
@@ -177,16 +243,23 @@ function ensureSocket() {
 
 function connectToRoom() {
   const roomId = getRoomId();
+
   if (!roomId) {
     setStatus("Please enter a room ID.");
     return;
   }
 
+  currentRoomId = roomId;
+
   const s = ensureSocket();
-  s.emit("join-room", {
-    roomId,
-    role
-  });
+
+  if (s.connected) {
+    s.emit("join-room", {
+      roomId,
+      role
+    });
+    isJoining = true;
+  }
 
   setStatus(`Joining room "${roomId}" as ${role}...`);
 }
@@ -198,14 +271,19 @@ async function startSharing() {
   }
 
   try {
-    if (!socket?.connected) {
+    if (!currentRoomId) {
       connectToRoom();
+    } else {
+      ensureSocket();
+    }
+
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+      localStream = null;
     }
 
     localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: 24
-      },
+      video: true,
       audio: false
     });
 
@@ -213,22 +291,18 @@ async function startSharing() {
 
     track.onended = () => {
       setStatus("Screen sharing stopped.");
-      for (const [, pc] of hostPeerConnections.entries()) {
+
+      for (const [viewerId, pc] of hostPeerConnections.entries()) {
         pc.close();
+        hostPeerConnections.delete(viewerId);
       }
-      hostPeerConnections.clear();
+
       localStream = null;
+      clearVideo();
     };
 
-    remoteVideo.srcObject = localStream;
-    remoteVideo.muted = true;
-    videoPlaceholder.style.display = "none";
+    showVideo(localStream, true);
     setStatus("Screen sharing started.\nWaiting for viewers...");
-
-    if (socket?.connected) {
-      const roomId = getRoomId();
-      socket.emit("join-room", { roomId, role: "host" });
-    }
   } catch (error) {
     console.error(error);
     setStatus(`Failed to share screen: ${error.message}`);
@@ -239,7 +313,7 @@ function createHostPeerConnection(viewerId) {
   const pc = new RTCPeerConnection(rtcConfig);
 
   pc.onicecandidate = (event) => {
-    if (event.candidate) {
+    if (event.candidate && socket) {
       socket.emit("ice-candidate", {
         target: viewerId,
         candidate: event.candidate
@@ -249,6 +323,14 @@ function createHostPeerConnection(viewerId) {
 
   pc.onconnectionstatechange = () => {
     console.log("Host PC state:", pc.connectionState);
+
+    if (
+      pc.connectionState === "failed" ||
+      pc.connectionState === "disconnected" ||
+      pc.connectionState === "closed"
+    ) {
+      cleanupHostPeer(viewerId);
+    }
   };
 
   return pc;
@@ -258,7 +340,7 @@ function createViewerPeerConnection(hostId) {
   const pc = new RTCPeerConnection(rtcConfig);
 
   pc.onicecandidate = (event) => {
-    if (event.candidate) {
+    if (event.candidate && socket) {
       socket.emit("ice-candidate", {
         target: hostId,
         candidate: event.candidate
@@ -268,13 +350,20 @@ function createViewerPeerConnection(hostId) {
 
   pc.ontrack = (event) => {
     const [stream] = event.streams;
-    remoteVideo.srcObject = stream;
-    videoPlaceholder.style.display = "none";
+    showVideo(stream, false);
     setStatus("Receiving host screen.");
   };
 
   pc.onconnectionstatechange = () => {
     console.log("Viewer PC state:", pc.connectionState);
+
+    if (
+      pc.connectionState === "failed" ||
+      pc.connectionState === "disconnected" ||
+      pc.connectionState === "closed"
+    ) {
+      cleanupViewerPeer();
+    }
   };
 
   return pc;
@@ -290,18 +379,16 @@ function leaveRoom() {
     localStream = null;
   }
 
-  if (viewerPeerConnection) {
-    viewerPeerConnection.close();
-    viewerPeerConnection = null;
-  }
+  cleanupViewerPeer();
 
-  for (const [, pc] of hostPeerConnections.entries()) {
+  for (const [viewerId, pc] of hostPeerConnections.entries()) {
     pc.close();
+    hostPeerConnections.delete(viewerId);
   }
-  hostPeerConnections.clear();
 
-  remoteVideo.srcObject = null;
-  videoPlaceholder.style.display = "block";
+  currentRoomId = null;
+  isJoining = false;
+  clearVideo();
   setStatus("Left room.");
   setRoomInfo("");
 }
