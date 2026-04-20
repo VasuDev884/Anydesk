@@ -18,10 +18,8 @@ let localStream = null;
 let currentRoomId = null;
 let isJoining = false;
 
-// Host side
 const hostPeerConnections = new Map();
 
-// Viewer side
 let viewerPeerConnection = null;
 let currentHostId = null;
 
@@ -73,7 +71,12 @@ async function showVideo(stream, muted = false) {
 }
 
 function clearVideo() {
-  remoteVideo.pause();
+  try {
+    remoteVideo.pause();
+  } catch (error) {
+    console.error("Video pause error:", error);
+  }
+
   remoteVideo.srcObject = null;
   videoPlaceholder.style.display = "block";
 }
@@ -83,7 +86,7 @@ function cleanupHostPeer(viewerId) {
   if (pc) {
     pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
-    pc.ontrack = null;
+    pc.onnegotiationneeded = null;
     pc.close();
     hostPeerConnections.delete(viewerId);
   }
@@ -92,13 +95,47 @@ function cleanupHostPeer(viewerId) {
 function cleanupViewerPeer() {
   if (viewerPeerConnection) {
     viewerPeerConnection.onicecandidate = null;
-    viewerPeerConnection.onconnectionstatechange = null;
     viewerPeerConnection.ontrack = null;
+    viewerPeerConnection.onconnectionstatechange = null;
     viewerPeerConnection.close();
     viewerPeerConnection = null;
   }
 
   currentHostId = null;
+}
+
+async function createAndSendOffer(viewerId) {
+  if (!localStream || !socket) return;
+  if (hostPeerConnections.has(viewerId)) return;
+
+  const videoTracks = localStream.getVideoTracks();
+  if (!videoTracks.length) {
+    setStatus("No video track found in shared screen.");
+    return;
+  }
+
+  const pc = createHostPeerConnection(viewerId);
+  hostPeerConnections.set(viewerId, pc);
+
+  localStream.getTracks().forEach((track) => {
+    pc.addTrack(track, localStream);
+  });
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socket.emit("offer", {
+      target: viewerId,
+      sdp: pc.localDescription
+    });
+
+    setStatus(`Viewer connected: ${viewerId}\nOffer sent.`);
+  } catch (error) {
+    console.error("Offer creation error:", error);
+    cleanupHostPeer(viewerId);
+    setStatus(`Failed to create offer: ${error.message}`);
+  }
 }
 
 setRole("host");
@@ -154,46 +191,20 @@ function ensureSocket() {
 
   socket.on("viewer-joined", async ({ viewerId }) => {
     if (role !== "host") return;
-
     if (!localStream) {
       setStatus("A viewer joined, but no shared screen is active yet.");
       return;
     }
 
-    const videoTracks = localStream.getVideoTracks();
-    if (!videoTracks.length) {
-      setStatus("No video track found in shared screen.");
-      return;
-    }
+    await createAndSendOffer(viewerId);
+  });
 
-    if (hostPeerConnections.has(viewerId)) {
-      cleanupHostPeer(viewerId);
-    }
+  socket.on("viewer-list", async ({ viewerIds }) => {
+    if (role !== "host") return;
+    if (!localStream) return;
 
-    const pc = createHostPeerConnection(viewerId);
-    hostPeerConnections.set(viewerId, pc);
-
-    localStream.getTracks().forEach((track) => {
-      pc.addTrack(track, localStream);
-    });
-
-    try {
-      const offer = await pc.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: false
-      });
-
-      await pc.setLocalDescription(offer);
-
-      socket.emit("offer", {
-        target: viewerId,
-        sdp: pc.localDescription
-      });
-
-      setStatus(`Viewer connected: ${viewerId}\nOffer sent.`);
-    } catch (error) {
-      console.error("Offer creation error:", error);
-      setStatus(`Failed to create offer: ${error.message}`);
+    for (const viewerId of viewerIds) {
+      await createAndSendOffer(viewerId);
     }
   });
 
@@ -344,6 +355,10 @@ async function startSharing() {
 
     await showVideo(localStream, true);
     setStatus("Screen sharing started.\nWaiting for viewers...");
+
+    if (socket?.connected && currentRoomId) {
+      socket.emit("request-viewers", { roomId: currentRoomId });
+    }
   } catch (error) {
     console.error("Share screen error:", error);
     setStatus(`Failed to share screen: ${error.message}`);
@@ -408,7 +423,7 @@ function createViewerPeerConnection(hostId) {
       return;
     }
 
-    await showVideo(stream, true);
+    await showVideo(stream, false);
     setStatus("Receiving host screen.");
   };
 

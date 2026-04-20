@@ -6,9 +6,7 @@ import { Server } from "socket.io";
 const PORT = process.env.PORT || 5000;
 
 const app = express();
-app.use(cors({
-  origin:"https://anydesk-p6gu.onrender.com/"
-}));
+app.use(cors());
 app.use(express.json());
 
 app.get("/", (_req, res) => {
@@ -28,13 +26,6 @@ const io = new Server(server, {
   }
 });
 
-/**
- * Room state shape:
- * {
- *   hostSocketId: string | null,
- *   viewers: Set<string>
- * }
- */
 const rooms = new Map();
 
 function getOrCreateRoom(roomId) {
@@ -63,22 +54,30 @@ io.on("connection", (socket) => {
     if (!roomId || !role) return;
 
     const room = getOrCreateRoom(roomId);
+
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.role = role;
 
     if (role === "host") {
       room.hostSocketId = socket.id;
+
       io.to(roomId).emit("room-info", {
         roomId,
         hostPresent: true,
         viewerCount: room.viewers.size
       });
+
+      io.to(socket.id).emit("viewer-list", {
+        viewerIds: [...room.viewers]
+      });
+
       console.log(`Host joined room ${roomId}: ${socket.id}`);
       return;
     }
 
     room.viewers.add(socket.id);
+
     io.to(roomId).emit("room-info", {
       roomId,
       hostPresent: !!room.hostSocketId,
@@ -95,8 +94,22 @@ io.on("connection", (socket) => {
     console.log(`Viewer joined room ${roomId}: ${socket.id}`);
   });
 
+  socket.on("request-viewers", ({ roomId }) => {
+    const room = rooms.get(roomId);
+
+    if (!room) {
+      socket.emit("viewer-list", { viewerIds: [] });
+      return;
+    }
+
+    socket.emit("viewer-list", {
+      viewerIds: [...room.viewers]
+    });
+  });
+
   socket.on("offer", ({ target, sdp }) => {
     if (!target || !sdp) return;
+
     io.to(target).emit("offer", {
       from: socket.id,
       sdp
@@ -105,6 +118,7 @@ io.on("connection", (socket) => {
 
   socket.on("answer", ({ target, sdp }) => {
     if (!target || !sdp) return;
+
     io.to(target).emit("answer", {
       from: socket.id,
       sdp
@@ -113,6 +127,7 @@ io.on("connection", (socket) => {
 
   socket.on("ice-candidate", ({ target, candidate }) => {
     if (!target || !candidate) return;
+
     io.to(target).emit("ice-candidate", {
       from: socket.id,
       candidate
@@ -131,6 +146,7 @@ io.on("connection", (socket) => {
       io.to(roomId).emit("host-left");
     } else if (role === "viewer") {
       room.viewers.delete(socket.id);
+
       if (room.hostSocketId) {
         io.to(room.hostSocketId).emit("viewer-left", {
           viewerId: socket.id
@@ -139,6 +155,7 @@ io.on("connection", (socket) => {
     }
 
     socket.leave(roomId);
+
     io.to(roomId).emit("room-info", {
       roomId,
       hostPresent: !!room.hostSocketId,
@@ -158,6 +175,7 @@ io.on("connection", (socket) => {
         io.to(roomId).emit("host-left");
       } else if (role === "viewer") {
         room.viewers.delete(socket.id);
+
         if (room.hostSocketId) {
           io.to(room.hostSocketId).emit("viewer-left", {
             viewerId: socket.id
