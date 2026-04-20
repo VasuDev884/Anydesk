@@ -18,10 +18,10 @@ let localStream = null;
 let currentRoomId = null;
 let isJoining = false;
 
-// For host: peer connections by viewer id
+// Host side
 const hostPeerConnections = new Map();
 
-// For viewer: a single host peer connection
+// Viewer side
 let viewerPeerConnection = null;
 let currentHostId = null;
 
@@ -47,6 +47,60 @@ function setRole(nextRole) {
   shareBtn.style.opacity = role === "host" ? "1" : "0.5";
 }
 
+function getServerUrl() {
+  return serverUrlInput.value.trim().replace(/\/+$/, "");
+}
+
+function getRoomId() {
+  return roomIdInput.value.trim();
+}
+
+async function showVideo(stream, muted = false) {
+  if (!stream) return;
+
+  remoteVideo.srcObject = stream;
+  remoteVideo.muted = muted;
+  remoteVideo.autoplay = true;
+  remoteVideo.playsInline = true;
+
+  try {
+    await remoteVideo.play();
+  } catch (error) {
+    console.error("Video play error:", error);
+  }
+
+  videoPlaceholder.style.display = "none";
+}
+
+function clearVideo() {
+  remoteVideo.pause();
+  remoteVideo.srcObject = null;
+  videoPlaceholder.style.display = "block";
+}
+
+function cleanupHostPeer(viewerId) {
+  const pc = hostPeerConnections.get(viewerId);
+  if (pc) {
+    pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;
+    pc.ontrack = null;
+    pc.close();
+    hostPeerConnections.delete(viewerId);
+  }
+}
+
+function cleanupViewerPeer() {
+  if (viewerPeerConnection) {
+    viewerPeerConnection.onicecandidate = null;
+    viewerPeerConnection.onconnectionstatechange = null;
+    viewerPeerConnection.ontrack = null;
+    viewerPeerConnection.close();
+    viewerPeerConnection = null;
+  }
+
+  currentHostId = null;
+}
+
 setRole("host");
 
 hostBtn.addEventListener("click", () => setRole("host"));
@@ -55,41 +109,6 @@ viewerBtn.addEventListener("click", () => setRole("viewer"));
 connectBtn.addEventListener("click", connectToRoom);
 shareBtn.addEventListener("click", startSharing);
 leaveBtn.addEventListener("click", leaveRoom);
-
-function getServerUrl() {
-  return serverUrlInput.value.trim();
-}
-
-function getRoomId() {
-  return roomIdInput.value.trim();
-}
-
-function showVideo(stream, muted = false) {
-  remoteVideo.srcObject = stream;
-  remoteVideo.muted = muted;
-  videoPlaceholder.style.display = "none";
-}
-
-function clearVideo() {
-  remoteVideo.srcObject = null;
-  videoPlaceholder.style.display = "block";
-}
-
-function cleanupHostPeer(viewerId) {
-  const pc = hostPeerConnections.get(viewerId);
-  if (pc) {
-    pc.close();
-    hostPeerConnections.delete(viewerId);
-  }
-}
-
-function cleanupViewerPeer() {
-  if (viewerPeerConnection) {
-    viewerPeerConnection.close();
-    viewerPeerConnection = null;
-  }
-  currentHostId = null;
-}
 
 function ensureSocket() {
   if (socket) return socket;
@@ -116,6 +135,7 @@ function ensureSocket() {
   });
 
   socket.on("connect_error", (error) => {
+    console.error("Socket connection error:", error);
     setStatus(`Connection error: ${error.message}`);
   });
 
@@ -140,6 +160,12 @@ function ensureSocket() {
       return;
     }
 
+    const videoTracks = localStream.getVideoTracks();
+    if (!videoTracks.length) {
+      setStatus("No video track found in shared screen.");
+      return;
+    }
+
     if (hostPeerConnections.has(viewerId)) {
       cleanupHostPeer(viewerId);
     }
@@ -152,12 +178,16 @@ function ensureSocket() {
     });
 
     try {
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({
+        offerToReceiveVideo: true,
+        offerToReceiveAudio: false
+      });
+
       await pc.setLocalDescription(offer);
 
       socket.emit("offer", {
         target: viewerId,
-        sdp: offer
+        sdp: pc.localDescription
       });
 
       setStatus(`Viewer connected: ${viewerId}\nOffer sent.`);
@@ -185,7 +215,7 @@ function ensureSocket() {
 
       socket.emit("answer", {
         target: from,
-        sdp: answer
+        sdp: viewerPeerConnection.localDescription
       });
 
       setStatus("Received offer from host.\nAnswer sent.");
@@ -229,8 +259,8 @@ function ensureSocket() {
 
   socket.on("host-left", () => {
     setStatus("Host left the room.");
-    clearVideo();
     cleanupViewerPeer();
+    clearVideo();
   });
 
   socket.on("viewer-left", ({ viewerId }) => {
@@ -283,28 +313,39 @@ async function startSharing() {
     }
 
     localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: {
+        frameRate: 24,
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
       audio: false
     });
 
-    const [track] = localStream.getVideoTracks();
+    const videoTracks = localStream.getVideoTracks();
+    console.log("Local stream:", localStream);
+    console.log("Local video tracks:", videoTracks);
+
+    if (!videoTracks.length) {
+      throw new Error("No video track found in selected screen.");
+    }
+
+    const [track] = videoTracks;
 
     track.onended = () => {
       setStatus("Screen sharing stopped.");
 
-      for (const [viewerId, pc] of hostPeerConnections.entries()) {
-        pc.close();
-        hostPeerConnections.delete(viewerId);
+      for (const [viewerId] of hostPeerConnections.entries()) {
+        cleanupHostPeer(viewerId);
       }
 
       localStream = null;
       clearVideo();
     };
 
-    showVideo(localStream, true);
+    await showVideo(localStream, true);
     setStatus("Screen sharing started.\nWaiting for viewers...");
   } catch (error) {
-    console.error(error);
+    console.error("Share screen error:", error);
     setStatus(`Failed to share screen: ${error.message}`);
   }
 }
@@ -348,9 +389,26 @@ function createViewerPeerConnection(hostId) {
     }
   };
 
-  pc.ontrack = (event) => {
-    const [stream] = event.streams;
-    showVideo(stream, false);
+  pc.ontrack = async (event) => {
+    console.log("Viewer received track event:", event);
+    console.log("Streams:", event.streams);
+    console.log("Track kind:", event.track?.kind);
+    console.log("Track readyState:", event.track?.readyState);
+    console.log("Track muted:", event.track?.muted);
+    console.log("Track enabled:", event.track?.enabled);
+
+    let stream = event.streams && event.streams[0];
+
+    if (!stream && event.track) {
+      stream = new MediaStream([event.track]);
+    }
+
+    if (!stream) {
+      setStatus("Viewer received track, but stream was empty.");
+      return;
+    }
+
+    await showVideo(stream, true);
     setStatus("Receiving host screen.");
   };
 
@@ -363,6 +421,7 @@ function createViewerPeerConnection(hostId) {
       pc.connectionState === "closed"
     ) {
       cleanupViewerPeer();
+      clearVideo();
     }
   };
 
@@ -381,9 +440,8 @@ function leaveRoom() {
 
   cleanupViewerPeer();
 
-  for (const [viewerId, pc] of hostPeerConnections.entries()) {
-    pc.close();
-    hostPeerConnections.delete(viewerId);
+  for (const [viewerId] of hostPeerConnections.entries()) {
+    cleanupHostPeer(viewerId);
   }
 
   currentRoomId = null;

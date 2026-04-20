@@ -1,4 +1,9 @@
-const { app, BrowserWindow, session, desktopCapturer } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  session,
+  desktopCapturer
+} = require("electron");
 const path = require("path");
 
 function createWindow() {
@@ -18,14 +23,30 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  session.defaultSession.setDisplayMediaRequestHandler(
-    async (request, callback) => {
+  const ses = session.defaultSession;
+
+  ses.setPermissionCheckHandler((_webContents, permission) => {
+    return permission === "display-capture" || permission === "media";
+  });
+
+  ses.setPermissionRequestHandler((_webContents, permission, callback) => {
+    if (permission === "display-capture" || permission === "media") {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
+
+  ses.setDisplayMediaRequestHandler(
+    async (_request, callback) => {
       try {
         const sources = await desktopCapturer.getSources({
-          types: ["screen", "window"]
+          types: ["screen"],
+          thumbnailSize: { width: 0, height: 0 }
         });
 
         if (!sources.length) {
+          console.error("No screen sources found.");
           callback({});
           return;
         }
@@ -46,11 +67,11 @@ app.whenReady().then(() => {
 
   createWindow();
 
-  app.on("activate", function () {
+  app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-app.on("window-all-closed", function () {
+app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
