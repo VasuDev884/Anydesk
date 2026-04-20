@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' 'unsafe-inline' https://cdn.socket.io ws://localhost:5000 http://localhost:5000; media-src 'self' blob:; connect-src 'self' ws://localhost:5000 http://localhost:5000;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Remote Desk MVP</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div>
+          <div class="eyebrow">Desktop Remote App</div>
+          <h1>Remote Desk MVP</h1>
+          <p class="muted">
+            Basic AnyDesk-like screen sharing app built with Electron, WebRTC,
+            and Socket.IO.
+          </p>
+        </div>
+
+        <div class="panel">
+          <label>Server URL</label>
+          <input id="serverUrl" value="http://localhost:5000" />
+
+          <label>Room ID</label>
+          <input id="roomId" placeholder="Enter room id" value="demo-room" />
+
+          <label>Role</label>
+          <div class="role-switch">
+            <button id="hostBtn" class="role active">Host</button>
+            <button id="viewerBtn" class="role">Viewer</button>
+          </div>
+
+          <div class="actions">
+            <button id="connectBtn" class="primary">Connect</button>
+            <button id="shareBtn">Start sharing</button>
+            <button id="leaveBtn">Leave room</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Status</h3>
+          <div id="status" class="status">Idle</div>
+          <div id="roomInfo" class="room-info"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Notes</h3>
+          <ul class="notes">
+            <li>Host shares the screen.</li>
+            <li>Viewer watches the stream in another app window.</li>
+            <li>For remote control, add a data channel + native OS input bridge next.</li>
+          </ul>
+        </div>
+      </aside>
+
+      <main class="stage">
+        <div class="video-wrap">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <div id="videoPlaceholder" class="video-placeholder">
+            Connect to a room to start.
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

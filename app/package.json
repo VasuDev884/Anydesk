@@ -1,0 +1,14 @@
+{
+  "name": "remote-desk-electron-app",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7"
+  }
+}
