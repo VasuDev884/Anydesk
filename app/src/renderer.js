@@ -60,28 +60,41 @@ function getRoomId() {
 async function showVideo(stream, muted = false) {
   if (!stream) return;
 
-  remoteVideo.srcObject = stream;
+  if (remoteVideo.srcObject !== stream) {
+    remoteVideo.srcObject = stream;
+  }
+
   remoteVideo.muted = muted;
   remoteVideo.autoplay = true;
   remoteVideo.playsInline = true;
 
-  try {
-    await remoteVideo.play();
-  } catch (error) {
-    console.error("Video play error:", error);
-  }
-
   videoPlaceholder.style.display = "none";
+
+  try {
+    const playPromise = remoteVideo.play();
+    if (playPromise !== undefined) {
+      await playPromise;
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      console.error("Video play error:", error);
+    }
+  }
 }
 
 function clearVideo() {
   try {
-    remoteVideo.pause();
+    if (!remoteVideo.paused) {
+      remoteVideo.pause();
+    }
   } catch (error) {
     console.error("Video pause error:", error);
   }
 
-  remoteVideo.srcObject = null;
+  if (remoteVideo.srcObject) {
+    remoteVideo.srcObject = null;
+  }
+
   videoPlaceholder.style.display = "block";
 }
 
@@ -447,7 +460,7 @@ function createHostPeerConnection(viewerId) {
   pc.onconnectionstatechange = () => {
     console.log("Host PC state:", pc.connectionState);
 
-    if (pc.connectionState === "failed") {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       setStatus(`Connection failed with viewer ${viewerId}`);
       cleanupHostPeer(viewerId);
     }
@@ -456,11 +469,7 @@ function createHostPeerConnection(viewerId) {
   pc.oniceconnectionstatechange = () => {
     console.log("Host ICE state:", pc.iceConnectionState);
 
-    if (
-      pc.iceConnectionState === "failed" ||
-      pc.iceConnectionState === "disconnected" ||
-      pc.iceConnectionState === "closed"
-    ) {
+    if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
       cleanupHostPeer(viewerId);
     }
   };
@@ -510,7 +519,7 @@ function createViewerPeerConnection(hostId) {
       setStatus("Viewer connected. Waiting for host screen...");
     }
 
-    if (pc.connectionState === "failed") {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       cleanupViewerPeer();
       clearVideo();
       setStatus("Viewer connection failed.");
@@ -520,17 +529,17 @@ function createViewerPeerConnection(hostId) {
   pc.oniceconnectionstatechange = () => {
     console.log("Viewer ICE state:", pc.iceConnectionState);
 
-    if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+    if (
+      pc.iceConnectionState === "connected" ||
+      pc.iceConnectionState === "completed"
+    ) {
       setStatus("Receiving host screen...");
     }
 
-    if (
-      pc.iceConnectionState === "failed" ||
-      pc.iceConnectionState === "disconnected" ||
-      pc.iceConnectionState === "closed"
-    ) {
+    if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
       cleanupViewerPeer();
       clearVideo();
+      setStatus("Viewer connection lost.");
     }
   };
 
